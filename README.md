@@ -12,7 +12,7 @@
 
 # Author
 Benjamin Pritchard
-* benjaminpritchard.org
-* kundalinisoftware.com
+* https://benjaminpritchard.org
+* https://kundalinisoftware.com
 
 
