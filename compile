@@ -1,0 +1,3 @@
+#!/bin/bash
+gcc pianomirror.c  /usr/lib/arm-linux-gnueabihf/libportmidi.so -o pianomirror
+
