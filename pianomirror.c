@@ -4,30 +4,28 @@
 //
 // Benjamin Pritchard / Kundalini Software
 //
+// This is the ANSI-C style version of this program (that I run on my Raspberri PI.) 
+//
 // Program to perform MIDI remapping to create a left handed piano using the portmidi libraries. (see webpage above for more information)
 // (Adapted from example programs included with portmidi.)
 //
-// Version History 
-//
-//		1.0		9-Feb-2019		Initial Version
-//		1.1		16-Feb-2019		Added ability to cycle through transposing modes using Low A on the piano
-//		1.2		15-March-2019	Project cleanup, added version resource
-//		1.3		4-April-2019	Updated to include icon
-//		1.4		20-Dec-2019		Updated to include new command to cycle through the modes
+// Version History in version.txt
 //
 
-// This string must be updated here, as well as in PianoMirro.rc!!!	[on windows only]
-const char *VersionString = "1.4";				
+const char *VersionString = "1.5";				
 
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
 #include "assert.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "portmidi/portmidi.h"
 #include "portmidi/pmutil.h"
 #include "portmidi/porttime.h"
-
-#pragma warning(disable:4996)			// need to use scanf MS Visual C
 
 // message queues for the main thread to communicate with the call back
 PmQueue *callback_to_main;
@@ -40,6 +38,18 @@ PmStream *midi_out;		// (transposed) outgoing midi
 
 #define IN_QUEUE_SIZE	1024		
 #define OUT_QUEUE_SIZE	1024
+
+// we write to this file as midi data comes in
+// it is a quick-and-dirty way for other processes 
+// on the machine to get at the raw MIDI data
+
+const char *IPC_Out = "/tmp/pianomirror.out";
+
+int fd_out;				// file descriptor for output file 
+struct flock lock;		// for locking the output file while we are writing to it
+
+// conversely, anything we read from here, we will interpret as a command
+const char *IPC_IN 	= "/tmp/pianomirror.in";
 
 // simple structure to pass messages back and forth between the main thread and our callback
 // these messages are inserted into 
@@ -160,6 +170,11 @@ void exit_with_message(char *msg)
 	exit(1);
 }
 
+
+void write_to_IPC() {
+	write(fd_out, "TEST\n", 5); 
+}
+
 // callback function 
 void process_midi(PtTimestamp timestamp, void *userData)
 {
@@ -195,6 +210,8 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			}
 		}
 	} while (result);
+	
+	
 
 	// process incoming midi data, performing transposion as necessary
 	do {
@@ -203,6 +220,11 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			int status, data1, data2;
 			if (Pm_Read(midi_in, &buffer, 1) == pmBufferOverflow)
 				continue;
+			
+			// we have some MIDI data to look at
+			
+			// for now, just write something to the IPC file whenever incoming data comes in...
+			write_to_IPC();
 
 			status = Pm_MessageStatus(buffer.message);
 			data1 = Pm_MessageData1(buffer.message);
@@ -238,10 +260,26 @@ void process_midi(PtTimestamp timestamp, void *userData)
 
 }
 
+// just open up a file called /tmp/pianomirror.out which we will
+// write to as MIDI bytes come in
+void InitIPC()
+{	
+	if ((fd_out = open(IPC_Out, O_WRONLY | O_CREAT | O_TRUNC, 0666)) < 0)  /* -1 signals an error */
+		exit_with_message("open failed...");
+}
+
+// not much to do for now
+// just close down /tmp/pianomirror.out
+void ShutdownIPC() {
+	close(fd_out); 
+}
+
 void initialize()
 {
 	const PmDeviceInfo *info;
 	int id;
+	
+	InitIPC();
 
 	/* make the message queues */
 	main_to_callback = Pm_QueueCreate(IN_QUEUE_SIZE, sizeof(CommandMessage));
@@ -285,12 +323,14 @@ void initialize()
 		NULL);
 
 	Pm_SetFilter(midi_in, PM_FILT_ACTIVE | PM_FILT_CLOCK);
-
+	
 	callback_active = TRUE;
 }
 
 void shutdown()
 {
+	ShutdownIPC();
+	
 	// shutting everything down; just ignore all errors; nothing we can do anyway...
 
 	Pt_Stop();
@@ -368,6 +408,7 @@ int main(int argc, char *argv[])
 	printf("NOTE: Make sure to turn off local echo mode on your digital piano.\n");
 
 	initialize();
+	
 
 	printf("no tranposition active\n");
 
