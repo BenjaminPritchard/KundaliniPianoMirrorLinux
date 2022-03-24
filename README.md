@@ -9,6 +9,8 @@
 * Windows version of this software: https://www.kundalinisoftware.com/kundalini-piano-mirror/
 * More information: https://www.kundalinisoftware.com/kundalini-piano-mirror/
 * http://portmedia.sourceforge.net/portmidi/
+* about the MIDI standard: https://www.cs.cmu.edu/~music/cmsip/readings/MIDI%20tutorial%20for%20programmers.html
+
 
 # Author
 Benjamin Pritchard
