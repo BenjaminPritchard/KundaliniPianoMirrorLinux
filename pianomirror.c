@@ -12,7 +12,7 @@
 // Version History in version.txt
 //
 
-const char *VersionString = "1.6";
+const char *VersionString = "1.7";
 
 #include "stdio.h"
 #include "stdlib.h"
@@ -234,17 +234,17 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			data1 = Pm_MessageData1(buffer.message);
 			data2 = Pm_MessageData2(buffer.message);
 
-			if (ShowMIDIData)
-			{
-				printf("status = %d, data1 = %d, data2 = %d \n", status, data1, data2);
-			}
-
+			if (ShowMIDIData)		
+				printf("input:  %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
+	
 			// do transposition logic
 			PmMessage NewNote = TransformNote(data1);
 
-			// echo back out the noteon command on the MIDI channel that the synth is setup to use
-			// normally this is 0, but the "Williams Allegro" that I am using here uses channel 2 for some reason??
-			status = status | MIDIchannel;
+			if (status != 128) {
+				// echo back out the noteon command on the MIDI channel that the synth is setup to use
+				// normally this is 0, but the "Williams Allegro" that I am using here uses channel 2 for some reason??
+				status = status | MIDIchannel;
+			}
 
 			// do logic associated with quite mode
 			int shouldEcho = (data2 < velocityThreshhold) || (velocityThreshhold == 0);
@@ -252,8 +252,11 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			buffer.message =
 				Pm_Message(status, NewNote, Pm_MessageData2(buffer.message));
 
-			if (shouldEcho)
+			if (shouldEcho) {
+				if (ShowMIDIData)
+					printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
 				Pm_Write(midi_out, &buffer, 1);
+			}
 
 			if (data1 == 21 && data2 == 0)
 			{
@@ -289,7 +292,7 @@ void initialize()
 		printf("Could not open default output device (%d).", id);
 		exit_with_message("");
 	}
-	printf("Opening output device %s %s\n", info->interf, info->name);
+	printf("Opening output device %d %s %s\n", id, info->interf, info->name);
 
 	Pm_OpenOutput(&midi_out,
 				  id,
@@ -311,7 +314,7 @@ void initialize()
 		printf("Could not open default input device (%d).", id);
 		exit_with_message("");
 	}
-	printf("Opening input device %s %s\n", info->interf, info->name);
+	printf("Opening input device %d %s %s\n", id, info->interf, info->name);
 	Pm_OpenInput(&midi_in,
 				 id,
 				 NULL,
@@ -320,6 +323,8 @@ void initialize()
 				 NULL);
 
 	Pm_SetFilter(midi_in, PM_FILT_ACTIVE | PM_FILT_CLOCK);
+
+	printf("Using MIDI echo back channel %d\n", MIDIchannel);
 
 	callback_active = TRUE;
 }
@@ -395,6 +400,44 @@ void set_transposition_mode(enum transpositionModes newmode)
 	} while (!receivedAck);
 }
 
+void list_midi_devices()
+{
+	int num_devs = Pm_CountDevices();
+	const PmDeviceInfo *pmInfo;
+
+	printf("\n");
+
+	if (num_devs == 0)
+	{
+		printf("No MIDI ports were found\n");
+		exit(1);
+	}
+
+	printf("MIDI input ports:\n");
+	for (int i = 0; i < num_devs; i++)
+	{
+		pmInfo = Pm_GetDeviceInfo(i);
+
+		if (pmInfo->input)
+		{
+			printf("%d, %s %s\n", i, pmInfo->name, (i == Pm_GetDefaultInputDeviceID()) ? "(default)" : "");
+		}
+	}
+
+	printf("\nMIDI output ports:\n");
+	for (int i = 0; i < num_devs; i++)
+	{
+		pmInfo = Pm_GetDeviceInfo(i);
+
+		if (pmInfo->output)
+		{
+			printf("%d - %s %s\n", i, pmInfo->name, (i == Pm_GetDefaultOutputDeviceID()) ? "(default)" : "");
+		}
+	}
+	printf("\n");
+	exit(0);
+}
+
 void parseCmdLine(int argc, char **argv)
 {
 	int printHelp;
@@ -413,6 +456,7 @@ void parseCmdLine(int argc, char **argv)
 					"   -i, --input <0-9>           Specify MIDI input device number\n"
 					"   -o, --output <0-9>          Specify MIDI output device number\n"
 					"   -c, --channel <0-9>         Specify MIDI (echo back) channel number\n"
+					"   -l, --list                  List MIDI devices\n"
 					"   -v, --version               Displays version information\n"
 					"\n"
 					"Source code at: https://github.com/BenjaminPritchard/KundaliniPianoMirrorLinux\n"
@@ -480,6 +524,10 @@ void parseCmdLine(int argc, char **argv)
 			{
 				ShowMIDIData = TRUE;
 			}
+			else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0)
+			{
+				list_midi_devices();
+			}
 			else
 			{
 				fprintf(stderr, "Error: unknown option %s\n", argv[i]);
@@ -487,6 +535,21 @@ void parseCmdLine(int argc, char **argv)
 			}
 		}
 	}
+}
+
+void debugIT() {
+
+	PmEvent buffer;
+	int i;
+	PmError err;
+
+	for (i = 0; i < 16; i++) {
+		buffer.message = Pm_Message(144 + i, 32, 128);
+		err = Pm_Write(midi_out, &buffer, 1);
+		printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
+	}
+
+	exit(0);
 }
 
 int main(int argc, char *argv[])
@@ -504,6 +567,8 @@ int main(int argc, char *argv[])
 	printf("NOTE: Make sure to turn off local echo mode on your digital piano!!\n");
 
 	initialize();
+
+	debugIT();
 
 	printf("no tranposition active\n");
 
