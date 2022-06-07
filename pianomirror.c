@@ -290,13 +290,14 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			data1 = Pm_MessageData1(buffer.message);
 			data2 = Pm_MessageData2(buffer.message);
 
-			if (ShowMIDIData)		
+			if (ShowMIDIData)
 				printf("input:  %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
-	
+
 			// do transposition logic
 			PmMessage NewNote = TransformNote(data1);
 
-			if (status != 128) {
+			if (status != 128)
+			{
 				// echo back out the noteon command on the MIDI channel that the synth is setup to use
 				// normally this is 0, but the "Williams Allegro" that I am using here uses channel 2 for some reason??
 				status = status | MIDIchannel;
@@ -313,7 +314,6 @@ void process_midi(PtTimestamp timestamp, void *userData)
 				buffer.message =
 					Pm_Message(status, NewNote, Pm_MessageData2(buffer.message));
 
-<<<<<<< HEAD
 				if (shouldEcho)
 					Pm_Write(midi_out, &buffer, 1);
 			}
@@ -333,13 +333,6 @@ void process_midi(PtTimestamp timestamp, void *userData)
 				return natsConnection_Publish(nc, subj, (const void *)payload, 3);
 			}
 #endif
-=======
-			if (shouldEcho) {
-				if (ShowMIDIData)
-					printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
-				Pm_Write(midi_out, &buffer, 1);
-			}
->>>>>>> 986a68f7226eb5cec9098bdc1e26dd5167607821
 
 			if (data1 == 21 && data2 == 0)
 			{
@@ -582,7 +575,6 @@ void parseCmdLine(int argc, char **argv)
 				printf(
 					"Kundalini Piano Mirror\n"
 					"Usage: pianomirror [OPTIONS]\n"
-<<<<<<< HEAD
 					"   -h,  --help                 Displays this information.\n"
 					"   -d,  --debug                Print incoming MIDI messages.\n"
 					"   -i,  --input <0-9>          Specify MIDI input device number\n"
@@ -596,15 +588,6 @@ void parseCmdLine(int argc, char **argv)
 					"   -nr, --natsreceive          don't echo MIDI; only send MIDI on NATs receive\n"
 
 #endif
-=======
-					"   -h, --help                  Displays this information.\n"
-					"   -d, --debug                 Print incoming MIDI messages.\n"
-					"   -i, --input <0-9>           Specify MIDI input device number\n"
-					"   -o, --output <0-9>          Specify MIDI output device number\n"
-					"   -c, --channel <0-9>         Specify MIDI (echo back) channel number\n"
-					"   -l, --list                  List MIDI devices\n"
-					"   -v, --version               Displays version information\n"
->>>>>>> 986a68f7226eb5cec9098bdc1e26dd5167607821
 					"\n"
 					"Source code at: https://github.com/BenjaminPritchard/KundaliniPianoMirrorLinux\n"
 					"\n");
@@ -708,13 +691,15 @@ void parseCmdLine(int argc, char **argv)
 	}
 }
 
-void debugIT() {
+void debugIT()
+{
 
 	PmEvent buffer;
 	int i;
 	PmError err;
 
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < 16; i++)
+	{
 		buffer.message = Pm_Message(144 + i, 32, 128);
 		err = Pm_Write(midi_out, &buffer, 1);
 		printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
