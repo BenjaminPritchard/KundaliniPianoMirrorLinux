@@ -4,15 +4,19 @@
 //
 // Benjamin Pritchard / Kundalini Software
 //
-// This is the ANSI-C style version of this program (that I run on my Raspberri PI.)
+// This is the ANSI-C style version of this program (that I run on my Raspberri PI.) However, I think it can be
+// compiled to work on any UNIX-like system.
 //
-// Program to perform MIDI remapping to create a left handed piano using the portmidi libraries. (see webpage above for more information)
-// (Adapted from example programs included with portmidi.)
+// The point of this is to perform MIDI remapping to create a left handed piano using the portmidi libraries.
+// (see webpage above for more information.)
+//
+//	Additionally, this code can be compiled with the conditional compilation flag "USE_NATS" which allows
+// 	sending/receiving MIDI messages via the NATS messaging system.
 //
 // Version History in version.txt
 //
 
-const char *VersionString = "1.6";
+const char *VersionString = "1.7";
 
 #include "stdio.h"
 #include "stdlib.h"
@@ -26,6 +30,11 @@ const char *VersionString = "1.6";
 #include "portmidi/portmidi.h"
 #include "portmidi/pmutil.h"
 #include "portmidi/porttime.h"
+
+#ifdef USE_NATS
+#include "nats/nats.h"
+#define DEFAULT_NATS_URL "nats://localhost:4222"
+#endif
 
 // message queues for the main thread to communicate with the call back
 PmQueue *callback_to_main;
@@ -44,6 +53,14 @@ int MIDIInputDevice = -1;  // -1 means to use the default; this can be overridde
 int MIDIOutputDevice = -1; // -1 means to use the default; this can be overridden on the commmand line
 
 int ShowMIDIData = 0;
+
+// NOTE: it is possible to compile this code without using the NATS library at all
+// additionally, if we ARE compiling with NATS, then
+// NATS can OPTIONALLY be enabled on the command line when invoking this program
+#ifdef USE_NATS
+int natsreceive = 0;
+int natsbroadcast = 0;
+#endif
 
 // simple structure to pass messages back and forth between the main thread and our callback
 // these messages are inserted into
@@ -82,8 +99,47 @@ int splitPoint = 62; // default to middle d
 // 0 means no threshold; just let through all notes...
 // otherwise, this number represents the highest velocity number that we will let through
 int velocityThreshhold = 0;
+int midiEchoDisabled = 0;
 
 int callback_active = FALSE;
+
+#if defined(USE_NATS)
+char *nats_url = DEFAULT_NATS_URL;
+natsConnection *conn = NULL;
+natsSubscription *sub = NULL;
+natsOptions *opts = NULL;
+natsStatus NATSstatus;
+volatile bool done = false;
+
+// called whenever we get a chord change
+static void
+onChord(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closure)
+{
+	printf("current Chord: %s\n",
+		   natsMsg_GetData(msg));
+
+	// Need to destroy the message!
+	natsMsg_Destroy(msg);
+
+	// Notify the main thread that we are done.
+	*(bool *)(closure) = true;
+}
+
+// called whenever we get a MIDI in event
+static void
+onMIDIin(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closure)
+{
+	printf("MIDI in: %s\n",
+		   natsMsg_GetData(msg));
+
+	// Need to destroy the message!
+	natsMsg_Destroy(msg);
+
+	// Notify the main thread that we are done.
+	*(bool *)(closure) = true;
+}
+
+#endif
 
 // takes an input node, and maps it according to current transposition mode
 PmMessage TransformNote(PmMessage Note)
@@ -249,11 +305,33 @@ void process_midi(PtTimestamp timestamp, void *userData)
 			// do logic associated with quite mode
 			int shouldEcho = (data2 < velocityThreshhold) || (velocityThreshhold == 0);
 
-			buffer.message =
-				Pm_Message(status, NewNote, Pm_MessageData2(buffer.message));
+			// actually write the midi message [after all our processing] unless
+			// local MIDI echo is disabled
+			if (!midiEchoDisabled)
+			{
 
-			if (shouldEcho)
-				Pm_Write(midi_out, &buffer, 1);
+				buffer.message =
+					Pm_Message(status, NewNote, Pm_MessageData2(buffer.message));
+
+				if (shouldEcho)
+					Pm_Write(midi_out, &buffer, 1);
+			}
+
+#if defined(USE_NATS)
+			// if we are using NATs, and we are configured to echo MIDI over nats,
+			// then publish the midi event as a NATs message
+			if (natsbroadcast)
+			{
+				const int[2] * payload;
+				payload[0] = status;
+				payload[1] = data1;
+				payload[2] = data2;
+
+				const char *subj = "midiOUT";
+
+				return natsConnection_Publish(nc, subj, (const void *)payload, 3);
+			}
+#endif
 
 			if (data1 == 21 && data2 == 0)
 			{
@@ -322,6 +400,46 @@ void initialize()
 	Pm_SetFilter(midi_in, PM_FILT_ACTIVE | PM_FILT_CLOCK);
 
 	callback_active = TRUE;
+
+#if defined(USE_NATS)
+
+	if (natsbroadcast || natsreceive)
+	{
+
+		if (natsOptions_Create(&opts) != NATS_OK)
+			NATSstatus = NATS_NO_MEMORY;
+
+		if (NATSstatus == NATS_OK)
+		{
+			// initialize NATs
+			natsOptions_SetSendAsap(opts, true);
+			NATSstatus = natsConnection_ConnectTo(&conn, nats_url);
+		}
+
+		if (NATSstatus == NATS_OK)
+		{
+			// subscribe to chord change events...
+			// for use in benevolent mode
+			NATSstatus = natsConnection_Subscribe(&sub, conn, "chord", onMsg, (void *)&done);
+		}
+
+		if (NATSstatus == NATS_OK && natsreceive)
+		{
+			// subscribe to midiIN events
+			// (these are sent from external processing scripts, who are listening for our midiOUT events,
+			// after they do their processing)
+			NATSstatus = natsConnection_Subscribe(&sub, conn, "midiIN", onMsg, (void *)&done);
+			NATSstatus
+		}
+		// If there was an error, print a stack trace and exit
+		if (NATSstatus != NATS_OK)
+		{
+			nats_PrintLastErrorStack(stderr);
+			exit(2);
+		}
+	}
+
+#endif
 }
 
 void shutdown()
@@ -336,6 +454,15 @@ void shutdown()
 	Pm_Close(midi_out);
 
 	Pm_Terminate();
+
+#if defined(USE_NATS)
+
+	// shutdown NATs
+	natsSubscription_Destroy(sub);
+	natsConnection_Destroy(conn);
+	natsOptions_Destroy(opts);
+
+#endif
 }
 
 // send a quit message to the callback function
@@ -371,7 +498,6 @@ void signalExitToCallBack()
 // then wait around until it sends us an ACK back
 void set_transposition_mode(enum transpositionModes newmode)
 {
-
 	int receivedAck;
 
 	CommandMessage msg;
@@ -408,12 +534,19 @@ void parseCmdLine(int argc, char **argv)
 				printf(
 					"Kundalini Piano Mirror\n"
 					"Usage: pianomirror [OPTIONS]\n"
-					"   -h, --help                  Displays this information.\n"
-					"   -d, --debug                 Print incoming MIDI messages.\n"
-					"   -i, --input <0-9>           Specify MIDI input device number\n"
-					"   -o, --output <0-9>          Specify MIDI output device number\n"
-					"   -c, --channel <0-9>         Specify MIDI (echo back) channel number\n"
-					"   -v, --version               Displays version information\n"
+					"   -h,  --help                 Displays this information.\n"
+					"   -d,  --debug                Print incoming MIDI messages.\n"
+					"   -i,  --input <0-9>          Specify MIDI input device number\n"
+					"   -o,  --output <0-9>         Specify MIDI output device number\n"
+					"   -c,  --channel <0-9>        Specify MIDI (echo back) channel number\n"
+					"   -e,  --noecho               disable local midi echo"
+					"   -v,  --version              Displays version information\n"
+#ifdef USE_NATS
+					"   -n,  --nats <url>           Specify NATS URL, default =  " DEFAULT_NATS_URL "\n"
+					"   -nb, --natsbroadcast        broadcast incoming MIDI messages via NATs\n"
+					"   -nr, --natsreceive          don't echo MIDI; only send MIDI on NATs receive\n"
+
+#endif
 					"\n"
 					"Source code at: https://github.com/BenjaminPritchard/KundaliniPianoMirrorLinux\n"
 					"\n");
@@ -476,10 +609,38 @@ void parseCmdLine(int argc, char **argv)
 				printf("pianomirror version %s\n", VersionString);
 				exit(0);
 			}
+			else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--noecho") == 0)
+			{
+				midiEchoDisabled = FALSE;
+				printf("local midi echo disabled");
+			}
+
 			else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0)
 			{
 				ShowMIDIData = TRUE;
 			}
+#ifdef USE_NATS
+			else if (strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--nats_url") == 0)
+			{
+				if (i + 1 < argc)
+				{
+					nats_url = strdup(argv[i + 1]);
+				}
+				else
+				{
+					fprintf(stderr, "Error: --nats_url needs a value\n");
+					exit(1);
+				}
+			}
+			else if (strcmp(argv[i], "-nb") == 0 || strcmp(argv[i], "--natsbroadcast") == 0)
+			{
+				natsbroadcast = TRUE;
+			}
+			else if (strcmp(argv[i], "-nr") == 0 || strcmp(argv[i], "--natsreceive") == 0)
+			{
+				natsreceive = TRUE;
+			}
+#endif
 			else
 			{
 				fprintf(stderr, "Error: unknown option %s\n", argv[i]);
@@ -502,6 +663,21 @@ int main(int argc, char *argv[])
 	/* determine what type of test to run */
 	printf("Kundalini Piano Mirror version %s, written by Benjamin Pritchard\n", VersionString);
 	printf("NOTE: Make sure to turn off local echo mode on your digital piano!!\n");
+
+#ifdef USE_NATS
+	if (natsbroadcast || natsreceive)
+	{
+		printf("using NATs url: %s\n", nats_url);
+	}
+	if (natsbroadcast)
+	{
+		printf("NATs broadcast enabled\n");
+	}
+	if (natsreceive)
+	{
+		printf("NATs receive enabled\n");
+	}
+#endif
 
 	initialize();
 

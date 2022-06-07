@@ -1,2 +1,0 @@
-#!/bin/bash
-gcc pianomirror.c /usr/lib/x86_64-linux-gnu/libportmidi.so -o pianomirror
