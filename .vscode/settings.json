@@ -1,23 +1,25 @@
 {
-    "files.associations": {
-        "*.tcc": "c",
-        "cstdlib": "c",
-        "string": "c",
-        "exception": "c",
-        "memory_resource": "c",
-        "cmath": "c",
-        "functional": "c",
-        "fstream": "c",
-        "istream": "c",
-        "new": "c",
-        "numeric": "c",
-        "ostream": "c",
-        "sstream": "c",
-        "string_view": "c",
-        "tuple": "c",
-        "type_traits": "c",
-        "typeinfo": "c",
-        "utility": "c",
-        "algorithm": "c"
-    }
+  "files.associations": {
+    "*.tcc": "c",
+    "cstdlib": "c",
+    "string": "c",
+    "exception": "c",
+    "memory_resource": "c",
+    "cmath": "c",
+    "functional": "c",
+    "fstream": "c",
+    "istream": "c",
+    "new": "c",
+    "numeric": "c",
+    "ostream": "c",
+    "sstream": "c",
+    "string_view": "c",
+    "tuple": "c",
+    "type_traits": "c",
+    "typeinfo": "c",
+    "utility": "c",
+    "algorithm": "c",
+    "signal.h": "c",
+    "sigaction.h": "c"
+  }
 }

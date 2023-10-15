@@ -16,20 +16,23 @@
 // Version History in version.txt
 //
 
-const char *VersionString = "1.7";
+const char *VersionString = "1.8";
 
-#include "stdio.h"
-#include "stdlib.h"
-#include "string.h"
-#include "assert.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
 #include <unistd.h>
 
 #include "portmidi/portmidi.h"
 #include "portmidi/pmutil.h"
 #include "portmidi/porttime.h"
+
+#include "metronome.h"
 
 #ifdef USE_NATS
 #include "nats/nats.h"
@@ -141,6 +144,29 @@ onMIDIin(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closure)
 
 #endif
 
+void DoTick(int accent)
+{
+
+	PmEvent buffer;
+	int i;
+	PmError err;
+
+	if (accent)
+	{
+		buffer.message = Pm_Message(144, 107, 60);
+		err = Pm_Write(midi_out, &buffer, 1);
+		// sleep(1);
+		buffer.message = Pm_Message(144, 107, 0);
+		err = Pm_Write(midi_out, &buffer, 1);
+		//  printf("err = %d\n", err);
+		//  printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
+	}
+	else
+	{
+		printf(".");
+	}
+}
+
 // takes an input node, and maps it according to current transposition mode
 PmMessage TransformNote(PmMessage Note)
 {
@@ -248,6 +274,8 @@ void process_midi(PtTimestamp timestamp, void *userData)
 	{
 		return;
 	}
+
+	DoMetronome();
 
 	// process messages from the main thread
 	do
@@ -449,6 +477,8 @@ void shutdown()
 {
 	// shutting everything down; just ignore all errors; nothing we can do anyway...
 
+	KillMetronome();
+
 	Pt_Stop();
 	Pm_QueueDestroy(callback_to_main);
 	Pm_QueueDestroy(main_to_callback);
@@ -582,6 +612,7 @@ void parseCmdLine(int argc, char **argv)
 					"   -c,  --channel <0-9>        Specify MIDI (echo back) channel number\n"
 					"   -e,  --noecho               disable local midi echo"
 					"   -v,  --version              Displays version information\n"
+					"   -l,  --list                 List available MIDI devices\n"
 #ifdef USE_NATS
 					"   -n,  --nats <url>           Specify NATS URL, default =  " DEFAULT_NATS_URL "\n"
 					"   -nb, --natsbroadcast        broadcast incoming MIDI messages via NATs\n"
@@ -627,6 +658,11 @@ void parseCmdLine(int argc, char **argv)
 					fprintf(stderr, "Error: -o needs a value\n");
 					exit(1);
 				}
+			}
+			else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--list") == 0)
+			{
+				list_midi_devices();
+				exit(1);
 			}
 			else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--channel") == 0)
 			{
@@ -691,23 +727,6 @@ void parseCmdLine(int argc, char **argv)
 	}
 }
 
-void debugIT()
-{
-
-	PmEvent buffer;
-	int i;
-	PmError err;
-
-	for (i = 0; i < 16; i++)
-	{
-		buffer.message = Pm_Message(144 + i, 32, 128);
-		err = Pm_Write(midi_out, &buffer, 1);
-		printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
-	}
-
-	exit(0);
-}
-
 int main(int argc, char *argv[])
 {
 
@@ -739,7 +758,7 @@ int main(int argc, char *argv[])
 
 	initialize();
 
-	debugIT();
+	// debugIT();
 
 	printf("no tranposition active\n");
 
@@ -748,6 +767,9 @@ int main(int argc, char *argv[])
 	printf(" 4 [enter] for quiet mode\n");
 	printf(" 5 [enter] cycle to next mode\n");
 	printf(" 6 [enter] to toggle debug display of incoming MIDI messages\n");
+	printf(" 7  [enter] set metronome BMP\n");
+	printf(" 8  [enter] set time signature\n");
+	printf(" 9 [enter] enable\\disable metronome\n");
 	printf(" q [enter] to quit\n");
 
 	finished = FALSE;
@@ -811,6 +833,76 @@ int main(int argc, char *argv[])
 		if (strcmp(line, "6") == 0)
 		{
 			ShowMIDIData = !ShowMIDIData;
+		}
+
+		if (strcmp(line, "7") == 0)
+		{
+			printf("Enter bpm: ");
+			int n;
+			if (scanf("%d", &n) == 1)
+			{
+				setBeatsPerMinute(n); // this will reinitialize the timer for the metronome to the right frequency for us...
+				printf("bmp set to %d\n", n);
+			}
+		}
+
+		if (strcmp(line, "8") == 0)
+		{
+
+			printf("\nTime Signatures:\n"
+				   " 0 [enter] none (just click on each beat) \n"
+				   " 1 [enter] 2/4 \n"
+				   " 2 [enter] 3/4 \n"
+				   " 3 [enter] 4/4 \n"
+				   " 4 [enter] 5/4 \n"
+				   " 5 [enter] 6/8 \n");
+
+			int timeSig;
+			if (scanf("%d", &timeSig) == 1)
+			{
+
+				switch (timeSig)
+				{
+				case 0:
+					printf("none\n");
+					setBeatsPerMeasure(0);
+					break;
+				case 1:
+					printf("2/4\n");
+					setBeatsPerMeasure(2);
+					break;
+				case 2:
+					printf("3/4\n");
+					setBeatsPerMeasure(3);
+					break;
+				case 3:
+					printf("4/4\n");
+					setBeatsPerMeasure(4);
+					break;
+				case 4:
+					printf("5/4\n");
+					setBeatsPerMeasure(5);
+					break;
+				case 5:
+					printf("6/8\n");
+					setBeatsPerMeasure(6);
+					break;
+				}
+			}
+		}
+
+		if (strcmp(line, "9") == 0)
+		{
+			if (metronome_enabled)
+			{
+				DisableMetronome();
+				printf("metronome disabled\n");
+			}
+			else
+			{
+				EnableMetronome();
+				printf("metronome enabled\n");
+			}
 		}
 
 	} // while (!finished)
