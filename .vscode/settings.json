@@ -20,6 +20,12 @@
     "utility": "c",
     "algorithm": "c",
     "signal.h": "c",
-    "sigaction.h": "c"
+    "sigaction.h": "c",
+    "stdlib.h": "c",
+    "metronome.h": "c",
+    "lualib.h": "c",
+    "lua.h": "c",
+    "logo.h": "c",
+    "porttime.h": "c"
   }
 }

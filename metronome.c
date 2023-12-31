@@ -26,7 +26,16 @@
 
 #include "metronome.h"
 
+int bpm;
+bool metronome_enabled;
+int timer_flag;
+int beat;
+int measure;
+int beats_per_measure;
+
+// private routines
 void DoTick(int);
+void MetronomeTimerProc();
 
 void InitMetronome()
 {
@@ -48,7 +57,7 @@ void EnableMetronome()
 {
 	struct sigaction sa;
 
-	sa.sa_handler = DoTick;
+	sa.sa_handler = MetronomeTimerProc;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = 0;
 	if (sigaction(SIGALRM, &sa, NULL) == -1)
@@ -80,9 +89,9 @@ void DoMetronome()
 	{
 
 		if (beat == 0 || beats_per_measure == 0)
-			DoTick(0);
-		else
 			DoTick(1);
+		else
+			DoTick(0);
 
 		if (beats_per_measure == 0)
 		{

@@ -10,13 +10,10 @@
 // The point of this is to perform MIDI remapping to create a left handed piano using the portmidi libraries.
 // (see webpage above for more information.)
 //
-//	Additionally, this code can be compiled with the conditional compilation flag "USE_NATS" which allows
-// 	sending/receiving MIDI messages via the NATS messaging system.
-//
 // Version History in version.txt
 //
 
-const char *VersionString = "1.8";
+const char *VersionString = "2.0";
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -27,12 +24,18 @@ const char *VersionString = "1.8";
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <pthread.h>
 
 #include "portmidi/portmidi.h"
 #include "portmidi/pmutil.h"
 #include "portmidi/porttime.h"
-
 #include "metronome.h"
+#include "logo.h"
+
+#include "lua/include/lua.h"
+#include "lua/include/lualib.h"
+#include "lua/include/lauxlib.h"
 
 #ifdef USE_NATS
 #include "nats/nats.h"
@@ -55,7 +58,17 @@ int MIDIchannel = 0;
 int MIDIInputDevice = -1;  // -1 means to use the default; this can be overridden on the commmand line
 int MIDIOutputDevice = -1; // -1 means to use the default; this can be overridden on the commmand line
 
-int ShowMIDIData = 0;
+bool ShowMIDIData;
+int NoteOffset = 0;
+
+extern int bpm;
+extern bool metronome_enabled;
+
+char SCRIPT_LOCATION[] = "scripts/";
+
+lua_State *Lua_State;
+bool script_is_loaded = FALSE;
+char script_file[255];
 
 // NOTE: it is possible to compile this code without using the NATS library at all
 // additionally, if we ARE compiling with NATS, then
@@ -144,6 +157,10 @@ onMIDIin(natsConnection *nc, natsSubscription *sub, natsMsg *msg, void *closure)
 
 #endif
 
+bool isFirstTime = TRUE;
+
+bool ShouldReloadFile(char *filename);
+
 void DoTick(int accent)
 {
 
@@ -151,20 +168,29 @@ void DoTick(int accent)
 	int i;
 	PmError err;
 
+	static int count = 0;
+
 	if (accent)
 	{
 		buffer.message = Pm_Message(144, 107, 60);
 		err = Pm_Write(midi_out, &buffer, 1);
-		// sleep(1);
-		buffer.message = Pm_Message(144, 107, 0);
+
+		buffer.message = Pm_Message(128, 107, 0);
 		err = Pm_Write(midi_out, &buffer, 1);
-		//  printf("err = %d\n", err);
-		//  printf("output: %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
 	}
 	else
 	{
-		printf(".");
+		buffer.message = Pm_Message(144, 50, 60);
+		err = Pm_Write(midi_out, &buffer, 1);
+
+		buffer.message = Pm_Message(128, 50, 0);
+		err = Pm_Write(midi_out, &buffer, 1);
 	}
+
+	if (count < 12)
+		count++;
+	else
+		count = 0;
 }
 
 // takes an input node, and maps it according to current transposition mode
@@ -260,8 +286,8 @@ void exit_with_message(char *msg)
 	exit(1);
 }
 
-// callback function
-void process_midi(PtTimestamp timestamp, void *userData)
+// setup to work with digital_piano_1
+void process_midi_1(PtTimestamp timestamp, void *userData)
 {
 	PmError result;
 	PmEvent buffer;
@@ -326,8 +352,6 @@ void process_midi(PtTimestamp timestamp, void *userData)
 
 			if (status != 128)
 			{
-				// echo back out the noteon command on the MIDI channel that the synth is setup to use
-				// normally this is 0, but the "Williams Allegro" that I am using here uses channel 2 for some reason??
 				status = status | MIDIchannel;
 			}
 
@@ -370,6 +394,161 @@ void process_midi(PtTimestamp timestamp, void *userData)
 	} while (result);
 }
 
+// setup to work with digital_piano_2
+void process_midi_2(PtTimestamp timestamp, void *userData)
+{
+	PmError result;
+	PmEvent buffer;
+
+	CommandMessage cmd;		 // incoming message from main()
+	CommandMessage response; // our responses back to main()
+
+	// if we're not intialized, do nothing
+	if (!callback_active)
+	{
+		return;
+	}
+
+	DoMetronome();
+
+	// process messages from the main thread
+	do
+	{
+		result = Pm_Dequeue(main_to_callback, &cmd);
+		if (result)
+		{
+			switch (cmd.cmdCode)
+			{
+			case CMD_QUIT_MSG:
+				response.cmdCode = CMD_MSG_ACK;
+				Pm_Enqueue(callback_to_main, &response);
+				callback_active = FALSE;
+				return;
+				// no break needed; above statement just exits function
+			case CMD_SET_SPLIT_POINT:
+				break;
+			case CMD_SET_MODE:
+				transpositionMode = (cmd.Param1);
+				response.cmdCode = CMD_MSG_ACK;
+				Pm_Enqueue(callback_to_main, &response);
+				break;
+			}
+		}
+	} while (result);
+
+	// process incoming midi data, performing transposion as necessary
+	do
+	{
+		result = Pm_Poll(midi_in);
+		if (result)
+		{
+			int status, data1, data2;
+			if (Pm_Read(midi_in, &buffer, 1) == pmBufferOverflow)
+				continue;
+
+			// we have some MIDI data to look at
+
+			status = Pm_MessageStatus(buffer.message);
+			data1 = Pm_MessageData1(buffer.message);
+			data2 = Pm_MessageData2(buffer.message);
+
+			if (ShowMIDIData)
+				printf("input:  %d, %d, %d\n", Pm_MessageStatus(buffer.message), Pm_MessageData1(buffer.message), Pm_MessageData2(buffer.message));
+
+			// do transposition logic
+			data1 = TransformNote(data1);
+
+			// if (status != 128)
+			//{
+			status = status + NoteOffset;
+			//}
+
+			// if (ShowMIDIData)
+			// printf("output:  %d, %d, %d\n", status, data1, data2);
+
+			// do logic associated with quite mode
+			int shouldEcho = (data2 < velocityThreshhold) || (velocityThreshhold == 0);
+
+			///////////////////////////////////////////////
+			// this code needs debugged!!
+			///////////////////////////////////////////////
+
+			if (Lua_State && script_is_loaded)
+			{
+
+				// Push the fib function on the top of the lua stack
+				lua_getglobal(Lua_State, "process_midi");
+
+				// make sure the .Lua function process_midi is defined
+				if (lua_isfunction(Lua_State, -1))
+				{
+
+					lua_pushnumber(Lua_State, status);
+					lua_pushnumber(Lua_State, data1);
+					lua_pushnumber(Lua_State, data2);
+
+					if (lua_pcall(Lua_State, 3, 3, 0) == 0)
+					{
+
+						// Get the result from the lua stack
+						if ((lua_gettop(Lua_State) == 3 && lua_isnumber(Lua_State, -3) && lua_isnumber(Lua_State, -2) && lua_isnumber(Lua_State, -1)))
+						{
+							status = (int)lua_tointeger(Lua_State, -3);
+							data1 = (int)lua_tointeger(Lua_State, -2);
+							data2 = (int)lua_tointeger(Lua_State, -1);
+						}
+						else
+							printf("function 'process_midi' must return 3 numbers\n");
+
+						// Clean up.  If we don't do this last step, we'll leak stack memory.
+						lua_settop(Lua_State, 0); // discard anything returned, since we don't really know how many items were returned for sure
+												  // lua_pop(Lua_State, 3);
+					}
+					else
+					{
+						printf("error running function `process_midi': %s\n", lua_tostring(Lua_State, -1));
+					}
+				}
+				else
+					printf("no process_midi function defined in loaded .Lua script\n");
+			}
+
+			// actually write the midi message [after all our processing] unless
+			// local MIDI echo is disabled
+			if (!midiEchoDisabled)
+			{
+
+				buffer.message =
+					Pm_Message(status, data1, data2);
+
+				if (shouldEcho)
+					Pm_Write(midi_out, &buffer, 1);
+			}
+
+#if defined(USE_NATS)
+			// if we are using NATs, and we are configured to echo MIDI over nats,
+			// then publish the midi event as a NATs message
+			if (natsbroadcast)
+			{
+				const int[2] * payload;
+				payload[0] = status;
+				payload[1] = data1;
+				payload[2] = data2;
+
+				const char *subj = "midiOUT";
+
+				return natsConnection_Publish(nc, subj, (const void *)payload, 3);
+			}
+#endif
+
+			if (data1 == 21 && data2 == 0)
+			{
+				DoNextTranspositionMode();
+			}
+		}
+	} while (result);
+}
+
 void initialize()
 {
 	const PmDeviceInfo *info;
@@ -381,7 +560,11 @@ void initialize()
 	callback_to_main = Pm_QueueCreate(OUT_QUEUE_SIZE, sizeof(CommandMessage));
 	assert(callback_to_main != NULL);
 
-	Pt_Start(1, &process_midi, 0);
+	if (false)
+		Pt_Start(1, &process_midi_1, 0);
+	else
+		Pt_Start(1, &process_midi_2, 0);
+
 	Pm_Initialize();
 
 	// open default output device, if nothing was specified on the command line
@@ -478,6 +661,12 @@ void shutdown()
 	// shutting everything down; just ignore all errors; nothing we can do anyway...
 
 	KillMetronome();
+
+	// close down our lua interpreter
+	if (Lua_State)
+	{
+		lua_close(Lua_State);
+	}
 
 	Pt_Stop();
 	Pm_QueueDestroy(callback_to_main);
@@ -669,9 +858,9 @@ void parseCmdLine(int argc, char **argv)
 				if (i + 1 < argc)
 				{
 					MIDIchannel = atof(argv[i + 1]);
-					if (MIDIchannel < 0 || MIDIchannel > 9)
+					if (MIDIchannel < 0 || MIDIchannel > 16)
 					{
-						fprintf(stderr, "Error: value must be between 0 and 9.\n");
+						fprintf(stderr, "Error: value must be between 0 and 16.\n");
 						exit(1);
 					}
 				}
@@ -727,59 +916,143 @@ void parseCmdLine(int argc, char **argv)
 	}
 }
 
-int main(int argc, char *argv[])
+void CheckVoices()
 {
+}
 
-	int finished;
-
-	int len;
-	char line[STRING_MAX];
-
-	parseCmdLine(argc, argv);
-
-	/* determine what type of test to run */
-	printf("Kundalini Piano Mirror version %s, written by Benjamin Pritchard\n", VersionString);
-	printf("NOTE: Make sure to turn off local echo mode on your digital piano!!\n");
-
-#ifdef USE_NATS
-	if (natsbroadcast || natsreceive)
-	{
-		printf("using NATs url: %s\n", nats_url);
-	}
-	if (natsbroadcast)
-	{
-		printf("NATs broadcast enabled\n");
-	}
-	if (natsreceive)
-	{
-		printf("NATs receive enabled\n");
-	}
-#endif
-
-	initialize();
-
-	// debugIT();
-
-	printf("no tranposition active\n");
-
+void ShowCommands()
+{
 	printf("commands:\n");
-	printf(" 0 [enter] for no transposing \n 1 [enter] for left ascending mode \n 2 [enter] for right hand descending mode \n 3 [enter] for mirror image mode\n");
+	printf(" 0 [enter] for no transposing \n");
+	printf(" 1 [enter] for left ascending mode\n");
+	printf(" 2 [enter] for right hand descending mode \n");
+	printf(" 3 [enter] for mirror image mode\n");
 	printf(" 4 [enter] for quiet mode\n");
 	printf(" 5 [enter] cycle to next mode\n");
 	printf(" 6 [enter] to toggle debug display of incoming MIDI messages\n");
-	printf(" 7  [enter] set metronome BMP\n");
-	printf(" 8  [enter] set time signature\n");
+	printf(" 7 [enter] set metronome BMP\n");
+	printf(" 8 [enter] set time signature\n");
 	printf(" 9 [enter] enable\\disable metronome\n");
+	printf("10 [enter] set note offset\n");
+	printf("11 [enter] to load lua script\n");
+	printf("12 [enter] clear lua state\n");
+	printf("13 [enter] reload last script\n");
 	printf(" q [enter] to quit\n");
+}
+
+/*
+ * Check if a file exist using fopen() function
+ * return 1 if the file exist otherwise return 0
+ */
+int fileexists(const char *filename)
+{
+	/* try to open file to read */
+	FILE *file;
+	if (file = fopen(filename, "r"))
+	{
+		fclose(file);
+		return 1;
+	}
+	return 0;
+}
+
+void LoadLuaScript()
+{
+
+	char tmp[255];
+	char ext[] = ".lua";
+
+	if (Lua_State)
+	{
+		lua_close(Lua_State);
+	}
+
+	// each time we call this function, we create a new environment
+	// this is so that we can have a script loaded... then change it, and reload our changes
+	Lua_State = luaL_newstate();
+	luaL_openlibs(Lua_State);
+
+	printf("Enter lua script: ");
+
+	if (scanf("%s", tmp) == 1)
+	{
+
+		strcpy(script_file, SCRIPT_LOCATION);
+		strcat(script_file, tmp);
+
+		// tack on the extension if none is present
+		if (!strchr(script_file, '.'))
+			strcat(script_file, ext);
+
+		if (fileexists(script_file))
+		{
+			script_is_loaded = (luaL_dofile(Lua_State, script_file) == 0);
+			if (!script_is_loaded)
+			{
+				printf("%s\n", lua_tostring(Lua_State, -1));
+			}
+		}
+		else
+			printf("lua script not found: %s\n", script_file);
+	}
+}
+
+// resets the LUA state, and reloads [restarts] the last script we had loaded
+void ReLoadLuaScript()
+{
+
+	if (Lua_State)
+	{
+		lua_close(Lua_State);
+	}
+
+	// each time we call this function, we create a new environment
+	// this is so that we can have a script loaded... then change it, and reload our changes
+	Lua_State = luaL_newstate();
+	luaL_openlibs(Lua_State);
+
+	if (fileexists(script_file))
+	{
+		script_is_loaded = (luaL_dofile(Lua_State, script_file) == 0);
+		if (!script_is_loaded)
+		{
+			printf("error in .Lua script: %s\n", lua_tostring(Lua_State, -1));
+		}
+	}
+	else
+		printf("error loading lau script %s\n", script_file);
+}
+
+void *CheckOnFile(void *arg)
+{
+	while (1)
+	{
+		if (script_is_loaded)
+			if (ShouldReloadFile(script_file))
+			{
+				printf("script modified...\n");
+				ReLoadLuaScript();
+			}
+
+		sleep(5);
+	}
+}
+
+void *MainThread(void *arg)
+{
+	int len;
+	char line[STRING_MAX];
+	bool finished;
+
+	ShowCommands();
 
 	finished = FALSE;
 	while (!finished)
 	{
 
-		fgets(line, STRING_MAX, stdin);
-		len = strlen(line);
-		if (len > 0)
-			line[len - 1] = 0;
+		line[0] = 0;
+		int x = scanf("%s", line);
+		printf("%d\n", x);
 
 		if (strcmp(line, "q") == 0)
 		{
@@ -905,7 +1178,148 @@ int main(int argc, char *argv[])
 			}
 		}
 
+		if (strcmp(line, "10") == 0)
+		{
+			printf("Enter offset: ");
+			int n;
+			if (scanf("%d", &n) == 1)
+			{
+				NoteOffset = n;
+				printf("noteoffset set to %d\n", n);
+			}
+		}
+
+		if (strcmp(line, "11") == 0)
+		{
+			LoadLuaScript();
+		}
+
+		if (strcmp(line, "12") == 0)
+		{
+			if (Lua_State)
+			{
+				lua_close(Lua_State);
+				Lua_State = 0;
+			}
+		}
+
+		if (strcmp(line, "13") == 0)
+		{
+			ReLoadLuaScript();
+			isFirstTime = true;
+		}
+
+		ShowCommands();
 	} // while (!finished)
+}
+
+void SetUpInitialVoices()
+{
+	PmEvent buffer;
+	int i = 0;
+	PmError err;
+
+	uint8_t program_change[2] = {0xC0, 10};
+
+	buffer.message = Pm_Message(194, 6, 0);
+	err = Pm_Write(midi_out, &buffer, 1);
+
+	return;
+
+	while (true)
+	{
+		printf("%d\n", i);
+
+		buffer.message = Pm_Message(192, 19, 0);
+		err = Pm_Write(midi_out, &buffer, 1);
+
+		buffer.message = Pm_Message(144, 90, 50);
+		err = Pm_Write(midi_out, &buffer, 1);
+
+		buffer.message = Pm_Message(129, 90, 50);
+		err = Pm_Write(midi_out, &buffer, 1);
+
+		sleep(1);
+		i++;
+	}
+
+	buffer.message = Pm_Message(193, 12, 0);
+	err = Pm_Write(midi_out, &buffer, 1);
+
+	buffer.message = Pm_Message(194, 13, 0);
+	err = Pm_Write(midi_out, &buffer, 1);
+
+	buffer.message = Pm_Message(195, 14, 0);
+	err = Pm_Write(midi_out, &buffer, 1);
+}
+
+// returns TRUE if the loaded script has been modified, so that we can reload it
+bool ShouldReloadFile(char *filename)
+{
+
+	static time_t old_mtime;
+	struct stat file_stat;
+
+	// Retrieve the file times for the file.
+	if (stat(filename, &file_stat) < 0)
+	{
+		return FALSE;
+	}
+
+	// if this is the first time we are checking, then we definitely shouldn't reload the file
+	if (isFirstTime)
+	{
+		isFirstTime = FALSE;
+		old_mtime = file_stat.st_mtime;
+		return FALSE;
+	}
+
+	int retval = (old_mtime != file_stat.st_mtime);
+
+	old_mtime = file_stat.st_mtime;
+
+	return retval;
+}
+
+int main(int argc, char *argv[])
+{
+
+	parseCmdLine(argc, argv);
+
+	printf("%s\n", logo_txt);
+
+	printf("Kundalini Piano Mirror version %s, written by Benjamin Pritchard\n", VersionString);
+	printf("NOTE: Make sure to turn off local echo mode on your digital piano!!\n");
+
+#ifdef USE_NATS
+	if (natsbroadcast || natsreceive)
+	{
+		printf("using NATs url: %s\n", nats_url);
+	}
+	if (natsbroadcast)
+	{
+		printf("NATs broadcast enabled\n");
+	}
+	if (natsreceive)
+	{
+		printf("NATs receive enabled\n");
+	}
+#endif
+
+	initialize();
+
+	printf("no tranposition active\n");
+
+	bpm = 60;
+	setBeatsPerMeasure(4);
+
+	SetUpInitialVoices();
+
+	pthread_t thread_id1;
+	pthread_t thread_id2;
+	int err1 = pthread_create(&thread_id1, NULL, MainThread, NULL);
+	int err2 = pthread_create(&thread_id2, NULL, CheckOnFile, NULL);
+	pthread_join(thread_id1, NULL); // wait for the main thread to exit
 
 	shutdown();
 	return 0;
